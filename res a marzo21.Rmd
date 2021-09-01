@@ -1,0 +1,234 @@
+---
+title: "pesca PM"
+output: word_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r paquetes}
+library(tidyverse)
+```
+##1) Redes agalleras de 2017 a marzo 2021
+
+```{r}
+guess_encoding("agalleras a marzo2021.csv")
+
+agall <- read_csv("agalleras a marzo2021.csv", col_names = T, 
+                  locale = locale(encoding = "ISO-8859-1"),
+                  col_types = cols(
+                    Año = col_double(),
+                    `Fecha de inicio de las capturas` = col_date("%d/%m/%Y"),
+                    `Horario de inicio de capturas` = col_time(),
+                    `Fecha de finalización de capturas` = col_date("%d/%m/%Y"),
+                    `Horario de finalización de capturas` = col_time()
+                    )
+)
+
+agall <- agall %>% 
+  mutate(fechaI = `Fecha de inicio de las capturas`) %>% 
+  mutate(fechaF = `Fecha de finalización de capturas`) %>% 
+  mutate(numredes = `Número de Redes`) %>% 
+  mutate(horas = `Horas totales de capturas`) %>% 
+  mutate(sup = `Superfici de captura en m2 (Aprox)`) %>% 
+  mutate(captura = `numero total de peces capturados`) %>% 
+  mutate(eff = `Eff: horas * superficie`) %>% 
+  mutate(CPUE1000 = `CPUE * 1000`) %>% 
+  mutate(captura.1 = captura+1) %>%
+  mutate(CPUE1000.1 = (captura.1/eff)*1000) %>% 
+  select(Año, fechaI, fechaF,numredes, horas, sup, captura, captura.1,eff, CPUE1000, CPUE1000.1)
+
+spec(agall)
+```
+
+
+```{r plot tiempo}
+
+tiempo1 <- ggplot(agall, aes(x=fechaI, y= CPUE1000))+
+  geom_point()+
+  geom_smooth(color = "red")
+
+
+tiempo2 <- ggplot(agall, aes(x = fechaI, y = CPUE1000.1, size = eff))+
+  geom_point()+
+  geom_smooth()+
+  scale_y_continuous(trans = "log")
+
+```
+
+Hay mucha variabilidad en el esfuerzo, construyo valores de CPUE por períodos más amplios, por ejemplo mensual:
+
+```{r}
+agallm <- read_csv("agalleras mensual a marzo2021.csv", col_names = T, 
+                  locale = locale(encoding = "ISO-8859-1"),n_max = 30,
+                  na = "#¡NUM!")
+spec(agallm)
+```
+
+
+Defino las variables que voy a usar para ver los ajustes a modelos de crecimiento:
+abundancia a tiempo t como el CPUE*1000 mensual del tiempo t
+abundancia a tiempo t+1 como el siguiente
+lambda como la razón Nt+1/Nt
+
+```{r morris&doak}
+Nt <- agallm$CPUEmes[1:29]
+Nt1 <- agallm$CPUEmes[2:30]
+lambda <- Nt1/Nt
+
+plot(Nt,Nt1,asp=1)
+plot(log(Nt),log(Nt1/Nt),pch=16)
+plot(log(Nt),log(lambda))
+abline(h=0,lty=3)
+```
+
+Hago el ajuste al modelo densoindependiente. Prefiero definirlo para el logaritmo natural de la tasa de crecimiento que es más estable que para la exponencial de valores de abundancia. Hago el ajuste con nls (no lineal). 
+```{r aj indep}
+ind <- Nt1~Nt*exp(r)
+ind2 <- log(Nt1/Nt)~r
+ajuste.ind2 <- nls(ind2,start=c(r=0.06))  
+summary(ajuste.ind2)
+coef(ajuste.ind2)
+AIC(ajuste.ind2)
+```
+Exploro ajuste a Beverton-Holt
+```{r aj BH}
+bh<-log(Nt1)~log((alfa*Nt)/(1+Ki*Nt))
+bh2<-Nt1~(alfa*Nt)/(1+Ki*Nt)
+bh3 <- log(Nt1/Nt)~log(R/(1+(Nt/K)))
+bh4 <- log(Nt1/Nt)~log(R*K)-log(K+(R-1)*Nt)
+
+ajuste.bh3 <-nls(bh3,start=c(R=.5,K=.2),algorithm="port",lower=c(0,0)) 
+summary(ajuste.bh3)
+coef(ajuste.bh3)
+AIC(ajuste.bh3)
+
+plot(Nt,Nt1/Nt,ylim=c(0,24))
+points(Nt,predict(ajuste.bh3)^(-1),col="blue", pch=16)
+
+
+c <-lm(Nt/Nt1~Nt)
+c
+sum(c$residuals^2)#residual sum of squares
+sum(c$residuals^2)/34#varianza residual
+AIC(c)
+plot(Nt,Nt1/Nt,ylim=c(0,30))
+lines(Nt,predict(c)^(-1),col="blue")
+```
+A Ricker:
+```{r ricker}
+r<- log(Nt1)~log(alfa*Nt*exp((-1/K)*Nt))
+r2<-Nt1~alfa*Nt*exp((-1/K)*Nt)
+r3 <- log(Nt1/Nt)~r*(1-(Nt/K))
+
+ajuste.r3 <- nls(r3,start=c(r=1,K=.2),algorithm="port",lower=c(0,0))
+summary(ajuste.r3)
+coefficients(ajuste.r3)
+AIC(ajuste.r3)
+
+plot(Nt,Nt1/Nt,ylim=c(0,50))
+points(Nt,predict(ajuste.r3)^(-1),col="blue", pch=16)
+
+```
+
+Al modelo logístico discreto:
+```{r log discreto}
+logis<-log(Nt1)~log(Nt+(rd*Nt*(1-(Nt/K))))
+logis2<-Nt1~Nt+(rd*Nt*(1-(Nt/K)))
+logis3 <- log(Nt1/Nt)~log(1+rd-rd*Nt/K)
+logis4 <-Nt1~K/(1+exp(P0+r*trim))
+
+ajuste.logis2<-nls(logis2,start=c(rd=0.3,K=0.2),algorithm="port",lower=c(0,0))
+summary(ajuste.logis2)
+AIC(ajuste.logis2)
+
+plot(Nt,Nt1/Nt,ylim=c(0,70))
+points(Nt,predict(ajuste.logis2)^(-1),col="blue", pch=16)
+```
+
+con zeta discreto
+```{r zeta}
+zeta<-log(Nt1)~log(Nt+(rd*Nt*(1-((Nt/K)^zeta))))
+zeta2<-Nt1~Nt+(rd*Nt*(1-((Nt/K)^zeta)))
+zeta3 <-  log(Nt1/Nt)~ r*(1-((Nt/K)^zeta))
+ajuste.zeta3<-nls(zeta3,start=c(r=.3,K=.2,zeta=1),algorithm="port",lower=c(0,0))
+
+```
+No converge.
+
+```{r}
+#log razon en log Nt
+plot(log(Nt),log(Nt1/Nt),pch=16,ylim=c(-4,7))
+abline(h=0,lty=3)
+abline(h=-0.1327,col="darkgreen")
+#lines(log(Nt),predict(ajuste.bh3),col="red")
+#lines(log(Nt),predict(ajuste.r3),col="blue")
+#lines(log(Nt),predict(ajuste.logis3),col="orange")
+#lines(log(Nt),predict(ajuste.zeta3),col="violet")
+#points(log(Nt),predict(ajuste.zeta3),col="violet",pch=16,type="b")
+points(log(Nt),predict(ajuste.logis2),col="orange",pch=16)
+points(log(Nt),predict(ajuste.r3),col="blue",pch=16)
+points(log(Nt),predict(ajuste.bh3),col="red",pch=16)
+legend("bottomleft",c("BH","Ricker","logis","zeta","indep"),pch=16,col=c("red","blue","orange","violet","darkgreen"),bty="n",lty=1)
+
+```
+
+## Hallazgos con redes agalleras hasta marzo 2021
+La información de captura relativizada a esfuerzo nos habla de la abundancia de peces de la laguna. Se observa en los gráficos de tendencias temporales que en términos generales la abundancia bajó durante este período. También se observa que la población respondió rápidamente a los períodos de pocos meses sin pesca, donde se observan aumentos transitorios rápidamente contrarrestados por el esfuerzo de pesca. Se desprende de esta información que el esfuerzo de extracción supera al reclutamiento anual de la población.
+
+
+## Redes de arrastre hasta marzo 2021
+
+```{r}
+guess_encoding("arrastre a marzo2021.csv")
+
+arrastre <- read_csv("arrastre a marzo2021.csv", col_names = T, 
+                  locale = locale(encoding = "ASCII"),
+                  col_types = cols(
+                    `Fecha de pesca` = col_date("%d/%m/%Y")
+                    ))
+arrastre <- arrastre %>%    mutate(fecha = `Fecha de pesca`) %>% 
+                  mutate(eff = `Numero de arrastres`) %>% 
+                  mutate(total = `numero total de peces capturados`) %>% 
+                  select(fecha, eff, total, adultos, juveniles, alevinos)
+
+arr <- arrastre %>% 
+  pivot_longer(cols = c(total, adultos, juveniles, alevinos),names_to = "edad", values_to = "catch") %>% 
+  mutate(edad = factor(edad, levels = c("adultos","juveniles","alevinos"))) %>% 
+  mutate(CPUE = catch/eff) %>% 
+  mutate(CPUE.1= CPUE + 1) %>% 
+  filter(edad != "total")
+
+spec(arr)
+```
+
+```{r plots}
+
+
+edades <- ggplot(arr, aes(x=fecha, y= CPUE, fill = edad))+
+  geom_bar(stat = "identity",position = "fill")+
+  theme_minimal()
+edades
+
+adyjuv <- arr %>% filter(edad != "alevinos")
+adyjuvplot <- ggplot(adyjuv,aes(x=fecha, y=CPUE, fill = edad))+
+                       geom_bar(stat = "identity", position = "fill")+
+  theme_minimal()
+adyjuvplot
+
+adyjuv2 <- ggplot(adyjuv, aes(x = fecha, y = CPUE, col = edad))+
+  scale_y_continuous(trans = "log")+
+  geom_point()+
+  geom_smooth(se=F)+
+  theme_minimal()
+adyjuv2
+
+todos <- ggplot(arr, aes(x = fecha, y = CPUE, col = edad, size = eff))+
+  scale_y_continuous(trans = "log")+
+  geom_point()+
+  geom_smooth(se = FALSE)+
+  theme_minimal()
+todos
+```
+
